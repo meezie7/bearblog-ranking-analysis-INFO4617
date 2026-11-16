@@ -67,6 +67,14 @@ One notable discrepancy was *"What I've learned from this Microsoft outage,"* wh
 
 Overall, the results suggest that the published formula is a strong predictor of RSS ordering, but does not fully account for every position.
 
+## Visualization
+
+The following figure compares the actual RSS positions with the positions predicted by the reconstructed formula. The dashed diagonal represents perfect agreement between the two rankings.
+
+![Actual vs. Predicted Bear Blog Trending Rankings](ranking_comparison.png)
+
+*Figure 1. Actual RSS positions compared with positions predicted by Bear Blog's published ranking formula across 20 Trending posts. The strong positive Spearman correlation (ρ = 0.862) indicates substantial agreement, although several posts deviate from their predicted positions.*
+
 ## Limitations
 
 - The analysis uses a single snapshot of 20 posts, so results may differ across collection dates.
@@ -78,10 +86,4 @@ Overall, the results suggest that the published formula is a strong predictor of
 ## Repository Contents
 
 - `ranking_analysis.ipynb` — data collection, ranking calculations, statistical comparison, and visualization.
-- `data/` — collected data used in the analysis.
-- `figures/` — generated research figures.
-
-## Sources
-
-- [Bear Blog](https://bearblog.dev/)
-- [Bear Blog Trending RSS Feed](https://bearblog.dev/discover/feed/)
+- `ranking
