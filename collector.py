@@ -11,6 +11,7 @@ using Bear Blog's published ranking formula.
 import csv
 import json
 import math
+import sys
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -34,9 +35,7 @@ REPOSITORY_URL = (
 FEED_URL = "https://bearblog.dev/discover/feed/"
 OUTPUT_FILE = Path("ranking_observations.csv")
 
-USER_AGENT = (
-    f"{PROJECT_NAME}/1.0 (+{REPOSITORY_URL})"
-)
+USER_AGENT = f"{PROJECT_NAME}/1.0 (+{REPOSITORY_URL})"
 
 STOP_DATE = date(2026, 12, 6)
 LOCAL_TIMEZONE = ZoneInfo("America/Denver")
@@ -95,6 +94,15 @@ def get_response(session, url):
 # FEED COLLECTION
 # --------------------------------------------------
 
+def convert_feed_timestamp(published_struct):
+    """Convert a feedparser UTC timestamp into an aware UTC datetime."""
+
+    return datetime(
+        *published_struct[:6],
+        tzinfo=timezone.utc
+    )
+
+
 def collect_feed(session):
     """Retrieve and validate the public Trending RSS feed."""
 
@@ -122,12 +130,7 @@ def collect_feed(session):
                 f"Publication timestamp missing for: {title}"
             )
 
-        # Feed timestamps are interpreted as UTC.
-        published_timestamp = time.mktime(published_struct)
-        published = datetime.fromtimestamp(
-            published_timestamp,
-            tz=timezone.utc
-        )
+        published = convert_feed_timestamp(published_struct)
 
         posts.append({
             "position": position,
@@ -171,7 +174,6 @@ def get_upvote_count(session, post_url):
         )
 
     uid = uid_input["value"]
-
     parsed_url = urlparse(post_url)
 
     endpoint = (
@@ -202,30 +204,49 @@ def get_upvote_count(session, post_url):
 # --------------------------------------------------
 
 def calculate_score(upvotes, published):
-    """Calculate the score using Bear Blog's published formula."""
+    """
+    Calculate the published formula score.
 
-    if upvotes <= 0:
-        raise ValueError(
-            "The published formula uses log10(upvotes), "
-            "which is undefined for zero upvotes. "
-            "Snapshot not saved."
-        )
+    Zero-upvote posts have no defined score because log10(0)
+    is undefined. Return None for those posts so they can still
+    be recorded without inventing a score.
 
+    Negative upvote counts are invalid.
+    """
+
+    if upvotes < 0:
+        raise ValueError("Upvote count cannot be negative.")
+
+    if upvotes == 0:
+        return None
+
+    if published.tzinfo is None:
+        raise ValueError("Publication timestamp must include a timezone.")
+
+    published = published.astimezone(timezone.utc)
     seconds_since_epoch = (published - EPOCH).total_seconds()
 
-    score = (
+    return (
         math.log10(upvotes)
         + seconds_since_epoch / (BUOYANCY * 86400)
     )
 
-    return score
-
 
 def calculate_predicted_positions(rows):
-    """Rank posts by predicted score, highest score first."""
+    """
+    Rank posts with defined formula scores.
 
-    ranked_rows = sorted(
-        rows,
+    Zero-upvote posts remain in the dataset but receive blank
+    predicted-ranking fields. They are excluded from formula-based
+    rank comparisons.
+    """
+
+    ranked_rows = [
+        row for row in rows
+        if row["predicted_score"] is not None
+    ]
+
+    ranked_rows.sort(
         key=lambda row: (
             -row["predicted_score"],
             row["position"]
@@ -238,6 +259,13 @@ def calculate_predicted_positions(rows):
     }
 
     for row in rows:
+
+        if row["predicted_score"] is None:
+            row["predicted_position"] = None
+            row["rank_difference"] = None
+            row["absolute_rank_difference"] = None
+            continue
+
         predicted_position = predicted_positions[row["url"]]
 
         row["predicted_position"] = predicted_position
@@ -298,6 +326,78 @@ def append_snapshot(rows):
 
 
 # --------------------------------------------------
+# BUILT-IN TESTS
+# --------------------------------------------------
+
+def run_self_tests():
+    """Test zero-upvote handling and UTC timestamp conversion."""
+
+    test_date = datetime(
+        2026, 11, 20, 12, 0, 0,
+        tzinfo=timezone.utc
+    )
+
+    # A positive upvote count should produce a numeric score.
+    positive_score = calculate_score(10, test_date)
+    assert isinstance(positive_score, float)
+
+    # Zero upvotes should not crash or receive an invented score.
+    zero_score = calculate_score(0, test_date)
+    assert zero_score is None
+
+    # Negative upvotes should be rejected.
+    try:
+        calculate_score(-1, test_date)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Negative upvotes were not rejected.")
+
+    # A zero-upvote post should remain in the data but have
+    # blank predicted-ranking fields.
+    test_rows = [
+        {
+            "position": 1,
+            "url": "https://example.com/zero",
+            "predicted_score": zero_score,
+        },
+        {
+            "position": 2,
+            "url": "https://example.com/positive-a",
+            "predicted_score": 5.0,
+        },
+        {
+            "position": 3,
+            "url": "https://example.com/positive-b",
+            "predicted_score": 7.0,
+        },
+    ]
+
+    calculate_predicted_positions(test_rows)
+
+    assert test_rows[0]["predicted_position"] is None
+    assert test_rows[0]["rank_difference"] is None
+    assert test_rows[1]["predicted_position"] == 2
+    assert test_rows[2]["predicted_position"] == 1
+
+    # Feed timestamps should be explicitly interpreted as UTC.
+    struct_time = time.struct_time(
+        (2026, 11, 20, 12, 0, 0, 4, 324, 0)
+    )
+    converted = convert_feed_timestamp(struct_time)
+
+    assert converted == test_date
+    assert converted.tzinfo == timezone.utc
+
+    print("All self-tests passed.")
+    print("- Positive upvote scores work.")
+    print("- Zero-upvote posts are preserved without formula scores.")
+    print("- Negative upvote counts are rejected.")
+    print("- Zero-upvote posts are excluded from rank comparisons.")
+    print("- Feed timestamps are converted consistently to UTC.")
+
+
+# --------------------------------------------------
 # MAIN COLLECTION
 # --------------------------------------------------
 
@@ -314,7 +414,6 @@ def main():
 
     collected_at = datetime.now(timezone.utc)
     collected_at_string = collected_at.isoformat()
-
     snapshot_id = collected_at.strftime("%Y%m%dT%H%M%SZ")
 
     print(f"Starting snapshot: {snapshot_id}")
@@ -322,14 +421,12 @@ def main():
 
     session = create_session()
 
-    # Collect the entire feed first.
     posts = collect_feed(session)
 
     print(f"Feed entries found: {len(posts)}")
 
     rows = []
 
-    # Retrieve every upvote count before saving anything.
     for post in posts:
 
         upvotes = get_upvote_count(
@@ -351,24 +448,44 @@ def main():
             "published": post["published"].isoformat(),
             "upvotes": upvotes,
             "predicted_score": score,
+            "predicted_position": None,
+            "rank_difference": None,
+            "absolute_rank_difference": None,
         })
 
-        print(
-            f"{post['position']:>2}. "
-            f"{post['title']} | "
-            f"Upvotes: {upvotes}"
-        )
+        if upvotes == 0:
+            print(
+                f"{post['position']:>2}. "
+                f"{post['title']} | "
+                "Upvotes: 0 | Formula score undefined"
+            )
+        else:
+            print(
+                f"{post['position']:>2}. "
+                f"{post['title']} | "
+                f"Upvotes: {upvotes}"
+            )
 
-    # Calculate predicted positions and rank differences.
     rows = calculate_predicted_positions(rows)
 
-    # Save only after the complete snapshot succeeds.
     append_snapshot(rows)
+
+    zero_upvote_count = sum(
+        1 for row in rows if row["upvotes"] == 0
+    )
 
     print("\nSnapshot completed successfully.")
     print(f"Posts saved: {len(rows)}")
+    print(f"Zero-upvote posts: {zero_upvote_count}")
+    print(
+        f"Posts included in formula ranking: "
+        f"{len(rows) - zero_upvote_count}"
+    )
     print(f"Output file: {OUTPUT_FILE}")
 
 
 if __name__ == "__main__":
-    main()
+    if "--test" in sys.argv:
+        run_self_tests()
+    else:
+        main()
